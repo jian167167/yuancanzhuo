@@ -1,0 +1,30 @@
+name: ScrcpyRemote
+options:
+  bundleIdPrefix: com.local
+  createIntermediateGroups: true
+  deploymentTarget:
+    iOS: "15.0"
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    CODE_SIGNING_ALLOWED: "NO"
+    CODE_SIGNING_REQUIRED: "NO"
+    CODE_SIGN_IDENTITY: ""
+
+targets:
+  ScrcpyRemote:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+        excludes:
+          - "Info.plist"
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.local.scrcpyremote
+        PRODUCT_NAME: ScrcpyRemote
+        INFOPLIST_FILE: Sources/Info.plist
+        TARGETED_DEVICE_FAMILY: "1,2"
+        ENABLE_BITCODE: "NO"
+        ASSETCATALOG_COMPILER_APPICON_NAME: ""
