@@ -31,6 +31,10 @@ final class StreamClient {
 
     private var demux = AnnexBDemuxer()
 
+    /// 渲染队列：不占主线程，触摸事件和视频解码互不阻塞
+    private let videoQueue = DispatchQueue(label: "scrcpy.video", qos: .userInteractive)
+    private var frameIndex: Int64 = 0
+
     init() {}
 
     // MARK: - 连接
@@ -177,8 +181,9 @@ final class StreamClient {
             formatDesc = d
             let dims = CMVideoFormatDescriptionGetDimensions(d)
             videoSize = CGSize(width: Int(dims.width), height: Int(dims.height))
+            let layer = displayLayer
+            videoQueue.async { layer.flush() }
             DispatchQueue.main.async {
-                self.displayLayer.flush()
                 self.onStatus?("已连接 \(Int(dims.width))×\(Int(dims.height))")
                 self.onVideoSize?(self.videoSize)
             }
@@ -188,7 +193,7 @@ final class StreamClient {
     /// Annex B → AVCC（长度前缀），封装 CMSampleBuffer 送显
     private func feed(_ data: Data, isKey: Bool) {
         guard let fmt = formatDesc else { return }
-        let avcc = AnnexBConverter.toAVCC(data)
+        let avcc = AnnexBConverter.toAVCC(data, stripParameterSets: true)
         guard !avcc.isEmpty else { return }
 
         var blockBuffer: CMBlockBuffer?
@@ -219,9 +224,10 @@ final class StreamClient {
         guard replaceStatus == kCMBlockBufferNoErr else { return }
 
         var sampleBuffer: CMSampleBuffer?
+        frameIndex += 1
         var timing = CMSampleTimingInfo(
-            duration: .invalid,
-            presentationTimeStamp: .zero,
+            duration: CMTime(value: 1, timescale: 30),
+            presentationTimeStamp: CMTime(value: frameIndex, timescale: 30),
             decodeTimeStamp: .invalid
         )
         var sampleSize = length
@@ -239,22 +245,26 @@ final class StreamClient {
         )
         guard cs == noErr, let sb = sampleBuffer else { return }
 
-        if !isKey,
-           let attachments = CMSampleBufferGetSampleAttachmentsArray(sb, createIfNecessary: true),
-           let first = CFArrayGetValueAtIndex(attachments, 0) {
-            let dict = Unmanaged<CFMutableDictionary>.fromOpaque(first).takeUnretainedValue()
-            CFDictionarySetValue(
-                dict,
-                Unmanaged.passUnretained(kCMSampleAttachmentKey_NotSync).toOpaque(),
-                Unmanaged.passUnretained(kCFBooleanTrue).toOpaque()
-            )
-        }
+        // 必须立即显示，否则 layer 按 PTS 排队，表现为画面冻结
+        CMSetAttachment(
+            sb,
+            key: kCMSampleAttachmentKey_DisplayImmediately,
+            value: kCFBooleanTrue,
+            attachmentMode: kCMAttachmentMode_ShouldPropagate
+        )
+        CMSetAttachment(
+            sb,
+            key: kCMSampleAttachmentKey_NotSync,
+            value: isKey ? kCFBooleanFalse : kCFBooleanTrue,
+            attachmentMode: kCMAttachmentMode_ShouldPropagate
+        )
 
-        DispatchQueue.main.async {
-            if self.displayLayer.status == .failed {
-                self.displayLayer.flush()
+        let layer = displayLayer
+        videoQueue.async {
+            if layer.status == .failed || layer.requiresFlushToResumeDecoding {
+                layer.flush()
             }
-            self.displayLayer.enqueue(sb)
+            layer.enqueue(sb)
         }
     }
 
@@ -295,7 +305,7 @@ final class StreamClient {
 
 struct AnnexBConverter {
     /// 把 Annex B 的起始码替换为 4 字节大端长度
-    static func toAVCC(_ data: Data) -> Data {
+    static func toAVCC(_ data: Data, stripParameterSets: Bool = false) -> Data {
         let bytes = [UInt8](data)
         var starts: [Int] = []
         var scLens: [Int] = []
@@ -319,6 +329,12 @@ struct AnnexBConverter {
             let end = (idx + 1 < starts.count) ? starts[idx + 1] : bytes.count
             guard end > start else { continue }
             let nal = Array(bytes[start..<end])
+            guard let firstByte = nal.first else { continue }
+            if stripParameterSets {
+                let nalType = firstByte & 0x1f
+                // SPS/PPS 已由 formatDescription 携带，sample 内不再重复
+                if nalType == 7 || nalType == 8 { continue }
+            }
             let len = UInt32(nal.count).bigEndian
             out.append(UInt8(len & 0xff))
             out.append(UInt8((len >> 8) & 0xff))
