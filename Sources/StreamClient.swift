@@ -39,7 +39,7 @@ final class StreamClient {
 
     // MARK: - 连接
 
-    func connect(host: String, port: Int, serial: String) {
+    func connect(host: String, port: Int, serial: String, quality: String = "mid", token: String = "") {
         disconnect()
 
         var comps = URLComponents()
@@ -47,7 +47,14 @@ final class StreamClient {
         comps.host = host
         comps.port = port
         comps.path = "/ws"
-        comps.queryItems = [URLQueryItem(name: "serial", value: serial)]
+        var items = [
+            URLQueryItem(name: "serial", value: serial),
+            URLQueryItem(name: "q", value: quality),
+        ]
+        if !token.isEmpty {
+            items.append(URLQueryItem(name: "token", value: token))
+        }
+        comps.queryItems = items
         guard let url = comps.url else { return }
 
         let cfg = URLSessionConfiguration.default
@@ -299,6 +306,8 @@ final class StreamClient {
     func sendBack() { sendKey(4) }
     func sendRecents() { sendKey(187) }
     func sendPower() { sendKey(26) }
+    func sendVolumeUp() { sendKey(24) }
+    func sendVolumeDown() { sendKey(25) }
 }
 
 // MARK: - Annex B 工具
