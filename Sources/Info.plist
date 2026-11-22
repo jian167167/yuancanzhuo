@@ -29,6 +29,8 @@
 	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>需要访问局域网内的投屏网关，才能看到手机画面并操作</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>把远程截图保存到相册</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
