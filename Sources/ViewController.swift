@@ -6,6 +6,19 @@ final class VideoView: UIView {
     var videoLayer: AVSampleBufferDisplayLayer { layer as! AVSampleBufferDisplayLayer }
 }
 
+final class PaddingLabel: UILabel {
+    var padding = UIEdgeInsets(top: 7, left: 14, bottom: 7, right: 14)
+
+    override func drawText(in rect: CGRect) {
+        super.drawText(in: rect.inset(by: padding))
+    }
+
+    override var intrinsicContentSize: CGSize {
+        let s = super.intrinsicContentSize
+        return CGSize(width: s.width + padding.left + padding.right, height: s.height + padding.top + padding.bottom)
+    }
+}
+
 final class VideoContainer: UIView {
     let videoView = VideoView()
     var aspect: CGFloat = 1080.0 / 2400.0 {
@@ -63,6 +76,8 @@ final class ViewController: UIViewController {
     private let connectButton = UIButton(type: .system)
 
     private let exitFullscreenButton = UIButton(type: .system)
+    private let toastLabel = PaddingLabel()
+    private var toastWork: DispatchWorkItem?
 
     private var selectedSerial: String?
     private var connected = false
@@ -132,6 +147,7 @@ final class ViewController: UIViewController {
         rootStack.addArrangedSubview(sideBar)
 
         buildExitFullscreen()
+        buildToast()
 
         let tap = UITapGestureRecognizer(target: self, action: #selector(onTap(_:)))
         let pan = UIPanGestureRecognizer(target: self, action: #selector(onPan(_:)))
@@ -175,6 +191,9 @@ final class ViewController: UIViewController {
         sideStack.addArrangedSubview(makeSideButton("arrowtriangle.left.fill", #selector(doBack)))
         sideStack.addArrangedSubview(makeSideButton("circle", #selector(doHome)))
         sideStack.addArrangedSubview(makeSideButton("square", #selector(doRecents)))
+        sideStack.addArrangedSubview(separator())
+        sideStack.addArrangedSubview(makeSideButton("keyboard", #selector(openKeyboard)))
+        sideStack.addArrangedSubview(makeSideButton("camera", #selector(doShot)))
         sideStack.addArrangedSubview(separator())
         sideStack.addArrangedSubview(makeSideButton("arrow.up.left.and.arrow.down.right", #selector(toggleFullscreen)))
         sideStack.addArrangedSubview(makeSideButton("gearshape.fill", #selector(openSettings)))
@@ -225,6 +244,24 @@ final class ViewController: UIViewController {
             exitFullscreenButton.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
             exitFullscreenButton.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -12),
             exitFullscreenButton.heightAnchor.constraint(equalToConstant: 30),
+        ])
+    }
+
+    private func buildToast() {
+        toastLabel.textColor = .white
+        toastLabel.font = .systemFont(ofSize: 13, weight: .medium)
+        toastLabel.textAlignment = .center
+        toastLabel.backgroundColor = UIColor(white: 0, alpha: 0.72)
+        toastLabel.layer.cornerRadius = 14
+        toastLabel.clipsToBounds = true
+        toastLabel.numberOfLines = 2
+        toastLabel.isHidden = true
+        toastLabel.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(toastLabel)
+        NSLayoutConstraint.activate([
+            toastLabel.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            toastLabel.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -26),
+            toastLabel.widthAnchor.constraint(lessThanOrEqualTo: view.widthAnchor, constant: -70),
         ])
     }
 
@@ -416,7 +453,8 @@ final class ViewController: UIViewController {
                     guard let serial = d["serial"] as? String,
                           (d["state"] as? String) == "device" else { continue }
                     let model = (d["model"] as? String) ?? "设备"
-                    items.append((serial, model))
+                    let name = (d["name"] as? String) ?? ""
+                    items.append((serial, name.isEmpty ? model : name))
                 }
             }
             DispatchQueue.main.async {
@@ -508,6 +546,89 @@ final class ViewController: UIViewController {
         default:
             break
         }
+    }
+
+    // MARK: - 文字输入 / 截图
+
+    private func toast(_ s: String) {
+        toastLabel.text = s
+        toastLabel.isHidden = false
+        toastLabel.alpha = 1
+        toastWork?.cancel()
+        let w = DispatchWorkItem { [weak self] in
+            UIView.animate(withDuration: 0.25, animations: { self?.toastLabel.alpha = 0 }) { _ in
+                self?.toastLabel.isHidden = true
+            }
+        }
+        toastWork = w
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.2, execute: w)
+    }
+
+    @objc private func openKeyboard() {
+        guard connected else {
+            toast("先连接设备")
+            return
+        }
+        let ac = UIAlertController(title: "输入文字", message: "内容会输入到手机当前光标处", preferredStyle: .alert)
+        ac.addTextField { tf in
+            tf.placeholder = "要输入的文字"
+            tf.autocorrectionType = .no
+        }
+        ac.addAction(UIAlertAction(title: "取消", style: .cancel))
+        ac.addAction(UIAlertAction(title: "发送", style: .default) { [weak self, weak ac] _ in
+            guard let s = ac?.textFields?.first?.text, !s.isEmpty else { return }
+            self?.sendText(s)
+        })
+        present(ac, animated: true)
+    }
+
+    private func sendText(_ s: String) {
+        guard let host = resolveHost(), let serial = selectedSerial else { return }
+        var items = [
+            URLQueryItem(name: "serial", value: serial),
+            URLQueryItem(name: "s", value: s),
+        ]
+        let t = resolveToken()
+        if !t.isEmpty { items.append(URLQueryItem(name: "token", value: t)) }
+        var comps = URLComponents(string: "http://\(host):\(resolvePort())/api/text")
+        comps?.queryItems = items
+        guard let url = comps?.url else { return }
+        toast("发送中…")
+        URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
+            guard let self = self else { return }
+            var msg = "已发送"
+            if let data = data,
+               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               (obj["ok"] as? Bool) == false {
+                msg = "失败：" + ((obj["error"] as? String) ?? "请检查 ADBKeyboard")
+            } else if data == nil {
+                msg = "发送失败"
+            }
+            DispatchQueue.main.async { self.toast(msg) }
+        }.resume()
+    }
+
+    @objc private func doShot() {
+        guard let host = resolveHost(), let serial = selectedSerial else {
+            toast("先连接设备")
+            return
+        }
+        var items = [URLQueryItem(name: "serial", value: serial)]
+        let t = resolveToken()
+        if !t.isEmpty { items.append(URLQueryItem(name: "token", value: t)) }
+        var comps = URLComponents(string: "http://\(host):\(resolvePort())/api/shot")
+        comps?.queryItems = items
+        guard let url = comps?.url else { return }
+        toast("正在截图…")
+        URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
+            guard let self = self else { return }
+            guard let data = data, let img = UIImage(data: data) else {
+                DispatchQueue.main.async { self.toast("截图失败") }
+                return
+            }
+            UIImageWriteToSavedPhotosAlbum(img, nil, nil, nil)
+            DispatchQueue.main.async { self.toast("截图已存相册") }
+        }.resume()
     }
 
     // MARK: - 按键
